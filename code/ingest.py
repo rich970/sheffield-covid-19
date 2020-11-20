@@ -42,8 +42,10 @@ import matplotlib.pyplot as plt
 
 from datetime import date
 
-URL = "https://www.sheffield.ac.uk/autumn-term-2020/covid-19-statistics/"
-
+URL = 'https://www.sheffield.ac.uk/autumn-term-2020/covid-19-statistics/'
+URL_city = ('https://api.coronavirus.data.gov.uk/v1/data?'
+            'filters=areaType=ltla;areaName=sheffield&'
+            'structure={"date":"date","newCases":"newCasesByPublishDate"}')
 
 def main():
     # Argument Parsing
@@ -63,15 +65,22 @@ def main():
         required=False,
     )
     args = parser.parse_args()
+    response = fetch()
 
-    response_text = fetch()
-
-    data = extract_transform_data(response_text)
-
+    data = extract_transform_data(response)
+    print('----Uni data----')
     for row in data:
         print(row)
 
-    create_visualisations(data)
+    # Obtaining Sheffield city COVID data using GOV.UK API:
+    response_city = requests.get(URL_city)
+    response_city = response_city.json()['data']
+    print('----City data----')
+    city_data = []
+    for row in response_city[::-1]:
+        print([row['date'], row['newCases']])
+        city_data.append([row['date'], row['newCases']])
+    create_visualisations(data, city_data)
 
     # Converting output to CSV or JSON based on user input
     if args.csv_file is not None:
@@ -94,7 +103,6 @@ def transform(rows):
     Dates in the first cell, are transformed into ISO 8601 date
     strings of the form YYYY-MM-DD;
     Numbers in subsequent cells, are transformed into int.
-    Invalid inputs will result in an Exception being raised
 
     For your convenience, the output is sorted.
     """
@@ -109,13 +117,12 @@ def transform(rows):
     return sorted(result)
 
 
-def extract(response_text):
+def extract(dom):
     """
     Extract all the rows that plausibly contain data,
     and return them as a list of list of strings.
     """
 
-    dom = html5lib.parse(response_text, namespaceHTMLElements=False)
     rows = dom.findall(".//tr")
 
     result = []
@@ -141,6 +148,7 @@ def validate(table):
     Each row is checked to see if it is of the expected format.
     A fresh table is returned (some rows are removed because
     they are "metadata").
+    Invalid inputs will result in an Exception being raised.
     """
 
     validated = []
@@ -161,15 +169,16 @@ def extract_transform_data(response_text):
     """
     extract, clean and transform relevant data to make it usable
     """
+    dom = html5lib.parse(response_text, namespaceHTMLElements=False)
 
-    table = extract(response_text)
+    table = extract(dom)
     validated = validate(table)
     data = transform(validated)
 
     return data
 
 
-def create_visualisations(data):
+def create_visualisations(data, city_data):
     date_column = 0
     staff_column = 1
     studentColumn = 2
@@ -183,34 +192,65 @@ def create_visualisations(data):
         staff_values.append(row[staff_column])
         student_values.append(row[studentColumn])
 
+    # Restrict the Sheff City data to the same dates as the Uni data
+    city_data = [row for row in city_data if row[0] in dates]
+    # Use np arrays to allow vectoral algebra operations
+    city_count = np.array([row[1] for row in city_data])
+    staff_values= np.array(staff_values)
+    student_values= np.array(student_values)
+    
     # Similar implementation to https://matplotlib.org/3.1.1/gallery/lines_bars_and_markers/barchart.html
     locations = np.arange(len(dates))
+
     bar_width = 0.35
 
-    figure, axes = plt.subplots()
+    fig_width, fig_height = [10, 6]
+    figure, (ax1, ax2) = plt.subplots(2, 1, 
+                                      sharex=True, 
+                                      gridspec_kw={'hspace': 0.05,
+                                                   'height_ratios' : [2,1]},
+                                      figsize=(fig_width, fig_height))
 
-    staff_bars = axes.bar(
+    staff_bars = ax1.bar(
         locations - bar_width / 2, staff_values, bar_width, label="Staff"
     )
-    student_bars = axes.bar(
+    student_bars = ax1.bar(
         locations + bar_width / 2, student_values, bar_width, label="Students"
     )
+    
 
-    axes.set_title("Number of cases in staff and student populations")
-    axes.set_xlabel("Date")
-    axes.set_xticks(locations)
-    axes.set_xticklabels(dates)
-    axes.set_ylabel("Cases")
-    axes.legend()
-
-    add_column_labels(staff_bars, axes)
-    add_column_labels(student_bars, axes)
-
-    rect = [0.02, 0.02, 0.98, 0.95]
+    p1 = ax2.bar(locations,
+                 100*((staff_values)/city_count),
+                 bar_width,
+                 label='Staff')
+    p2 = ax2.bar(locations,
+                 100*((student_values)/city_count),
+                 bar_width,
+                 bottom=100*((staff_values)/city_count),
+                 label='Students')
+    p3 = ax2.bar(locations, 
+                 100*(1-((staff_values+student_values)/city_count)),
+                 bar_width,
+                 bottom=100*((staff_values+student_values)/city_count),
+                 label='Rest of Sheffield')
+    
+    ax1.plot()
+    add_column_labels(staff_bars, ax1)
+    add_column_labels(student_bars, ax1)
+    ax1.set_title("Number of cases in staff and student populations")
+    ax1.label_outer()
+    ax1.legend()
+    
+    ax2.set_xlabel("Date")
+    ax2.set_xticks(locations)
+    ax2.set_xticklabels(dates)
+    ax1.set_ylabel("Cases")
+    ax2.set_ylabel("Relative cases [%]")
+    ax2.set_ylim([0,100])
+    ax2.legend()
 
     plt.xticks(rotation=90)
-    plt.tight_layout(pad=1.2, h_pad=None, w_pad=None, rect=rect)
-    plt.margins(0.02, 0.1)
+    plt.margins(0.02, 0.05)
 
     filename = str(date.today()) + "-staff-student-covid-cases.png"
     plt.savefig(filename, dpi=600)
@@ -222,7 +262,7 @@ def add_column_labels(bars, axes):
         axes.annotate(
             "{}".format(height),
             xy=(bar.get_x() + bar.get_width() / 2, height),
-            xytext=(0, 3),  # Offset label by 3pt above bar
+            xytext=(0, 1),  # Offset label by 1pt above bar
             textcoords="offset points",
             ha="center",
             va="bottom",
